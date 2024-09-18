@@ -534,7 +534,9 @@ impl Judge {
                     x.set_time(t);
                     let dist = (x.now() - pos.x).abs();
                     let cur_size = note.object.scale.0.now_opt().unwrap_or(1.);
-                    debug!("size: {cur_size}");
+                    if cur_size != 1. {
+                        debug!("found sized note: {cur_size}")
+                    };
                     if dist > X_DIFF_MAX * cur_size {
                         continue;
                     }
