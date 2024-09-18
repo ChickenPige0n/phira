@@ -382,7 +382,11 @@ async fn parse_notes(
                 },
                 translation: AnimVector(AnimFloat::fixed(note.position_x / (RPE_WIDTH / 2.)), AnimFloat::fixed(y_offset)),
                 scale: AnimVector(
-                    AnimFloat::fixed(note.size),
+                    if note.size == 1.0 {
+                        AnimFloat::default()
+                    } else {
+                        AnimFloat::fixed(note.size)
+                    },
                     AnimFloat::default(),
                 ),
                 ..Default::default()
