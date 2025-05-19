@@ -4,11 +4,12 @@ use super::{CollectionPage, NextPage, Page, SharedState};
 use crate::{
     charts_view::{ChartDisplayItem, ChartsView, NEED_UPDATE},
     client::{Chart, Client},
-    get_data,
+    get_data, get_data_mut,
     icons::Icons,
     popup::Popup,
     rate::RateDialog,
-    scene::{check_read_tos_and_policy, ChartOrder, JUST_LOADED_TOS, ORDERS},
+    save_data,
+    scene::{check_read_tos_and_policy, import_chart, ChartOrder, JUST_LOADED_TOS, ORDERS},
     tabs::{Tabs, TitleFn},
     tags::TagsDialog,
     ttl,
@@ -28,6 +29,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 use tap::Tap;
+use tracing::info;
 
 const PAGE_NUM: u64 = 28;
 
@@ -67,6 +69,7 @@ pub struct LibraryPage {
 
     icons: Arc<Icons>,
 
+    import_from_url_btn: DRectButton,
     import_btn: DRectButton,
 
     search_btn: DRectButton,
@@ -112,6 +115,7 @@ impl LibraryPage {
 
             icons,
 
+            import_from_url_btn: DRectButton::new(),
             import_btn: DRectButton::new(),
 
             search_btn: DRectButton::new(),
@@ -313,6 +317,10 @@ impl Page for LibraryPage {
 
         match self.tabs.selected().ty {
             ChartListType::Local => {
+                if self.import_from_url_btn.touch(touch, t) {
+                    request_input("chart_url", "");
+                    return Ok(true);
+                }
                 if self.import_btn.touch(touch, t) {
                     request_file("_import");
                     return Ok(true);
@@ -436,6 +444,85 @@ impl Page for LibraryPage {
                     self.current_page = 0;
                     self.load_online();
                 }
+            } else if id == "chart_url" {
+                if text.is_empty() {
+                    return_input(id, text);
+                    return Ok(());
+                }
+                let url = text.trim().to_string();
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    info!("Invalid URL format: {}", url);
+                    show_message(format!("{}: {}", tl!("invalid-url"), url)).error();
+                    return Ok(());
+                }
+                let task = Box::pin(async move {
+                    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
+                    let chart_url = url.to_string();
+
+                    info!("Trying to download chart from {}", chart_url);
+                    // download chart data
+                    let response = match client.get(&chart_url).send().await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            info!("Connection failed: {}", e);
+                            show_message(format!("{} - {}", tl!("connect-failed"), chart_url)).error();
+                            return Ok(NextPage::None);
+                        }
+                    };
+
+                    if response.status().is_success() {
+                        info!("Successfully connected to {}", chart_url);
+                        let bytes = match response.bytes().await {
+                            Ok(b) => b,
+                            Err(e) => {
+                                info!("Failed to download chart data: {}", e);
+                                show_message(tl!("download-failed")).error();
+                                return Ok(NextPage::None);
+                            }
+                        };
+
+                        let temp_dir = match tempfile::tempdir() {
+                            Ok(dir) => dir,
+                            Err(e) => {
+                                info!("Failed to create temp directory: {}", e);
+                                show_message(tl!("download-failed")).error();
+                                return Ok(NextPage::None);
+                            }
+                        };
+                        let chart_zip_path = temp_dir.path().join("chart.zip");
+                        if let Err(e) = std::fs::write(&chart_zip_path, &bytes) {
+                            info!("Failed to write chart file: {}", e);
+                            show_message(tl!("download-failed")).error();
+                            return Ok(NextPage::None);
+                        }
+                        info!("Downloaded chart file, size: {} bytes", bytes.len());
+                        show_message(tl!("download-success")).ok();                        // 导入谱面
+                        match import_chart(chart_zip_path.to_string_lossy().to_string()).await {
+                            Ok(chart) => {
+                                info!("Successfully imported chart");
+                                // save to local charts
+                                get_data_mut().charts.push(chart);
+                                if let Err(e) = save_data() {
+                                    info!("Failed to save data: {}", e);
+                                    show_message(tl!("import-failed")).error();
+                                    return Ok(NextPage::None);
+                                }
+                                // Update the charts view
+                                NEED_UPDATE.store(true, Ordering::Relaxed);
+                                show_message(tl!("import-success")).ok();
+                            }
+                            Err(e) => {
+                                info!("Failed to import chart from {}: {}", chart_url, e);
+                                show_message(format!("{}: {}", tl!("no-chart-found"), e)).error();
+                            }
+                        }
+                    } else {
+                        show_message(tl!("no-chart-found")).error();
+                    }
+
+                    Ok(NextPage::None)
+                });
+                self.next_page_task = Some(task);
             } else {
                 return_input(id, text);
             }
@@ -508,6 +595,14 @@ impl Page for LibraryPage {
                         ui.fill_path(&path, semi_black(0.4));
                     });
                     ui.text(tl!("import")).pos(ct.x, ct.y).anchor(0.5, 0.5).no_baseline().size(0.6).draw();
+
+                    r.w = 0.5;
+                    r.x -= r.w + 0.02;
+                    let ct = r.center();
+                    self.import_from_url_btn.render_shadow(ui, r, t, |ui, path| {
+                        ui.fill_path(&path, semi_black(0.4));
+                    });
+                    ui.text(tl!("import-from-url")).pos(ct.x, ct.y).anchor(0.5, 0.5).no_baseline().size(0.6).draw();
                 } else {
                     self.order_btn.render_shadow(ui, r, t, |ui, path| {
                         ui.fill_path(&path, semi_black(0.4));
