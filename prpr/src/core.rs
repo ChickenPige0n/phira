@@ -45,7 +45,7 @@ pub use render::{copy_fbo, internal_id, MSRenderTarget};
 
 mod resource;
 pub use resource::{
-    NoteStyle, ParticleEmitter, ResPackInfo, Resource, ResourcePack, TextureAtlasRegion, 
+    NoteStyle, ParticleEmitter, ResPackInfo, Resource, ResourcePack, TextureAtlas, TextureAtlasRegion, 
     BUFFER_SIZE, DPI_VALUE,
 };
 

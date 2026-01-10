@@ -39,6 +39,88 @@ impl TextureAtlasRegion {
     pub fn to_rect(&self) -> Rect {
         Rect::new(self.x, self.y, self.w, self.h)
     }
+    
+    /// Get normalized UV coordinates for this region
+    pub fn to_uv_rect(&self, atlas_width: f32, atlas_height: f32) -> Rect {
+        Rect::new(
+            self.x / atlas_width,
+            self.y / atlas_height,
+            self.w / atlas_width,
+            self.h / atlas_height,
+        )
+    }
+}
+
+/// Texture atlas that packs multiple note textures into a single texture
+/// This significantly reduces texture binding calls and state changes
+#[derive(Clone)]
+pub struct TextureAtlas {
+    pub texture: SafeTexture,
+    pub width: f32,
+    pub height: f32,
+    pub regions: std::collections::HashMap<String, TextureAtlasRegion>,
+}
+
+impl TextureAtlas {
+    /// Create a texture atlas by packing multiple textures horizontally
+    /// This is a simple but effective packing strategy for note textures
+    pub async fn pack_horizontal(textures: Vec<(String, image::DynamicImage)>) -> Result<Self> {
+        if textures.is_empty() {
+            bail!("Cannot create atlas from empty texture list");
+        }
+        
+        // Calculate total atlas dimensions
+        let total_width: u32 = textures.iter().map(|(_, img)| img.width()).sum();
+        let max_height: u32 = textures.iter().map(|(_, img)| img.height()).max().unwrap();
+        
+        // Create atlas image
+        let mut atlas_image = image::DynamicImage::new_rgba8(total_width, max_height);
+        
+        // Pack textures and record regions
+        let mut regions = std::collections::HashMap::new();
+        let mut x_offset = 0u32;
+        
+        for (name, img) in textures {
+            let img_width = img.width();
+            let img_height = img.height();
+            
+            // Copy image into atlas
+            image::imageops::overlay(&mut atlas_image, &img, x_offset.into(), 0);
+            
+            // Record region
+            regions.insert(
+                name,
+                TextureAtlasRegion::new(
+                    x_offset as f32,
+                    0.0,
+                    img_width as f32,
+                    img_height as f32,
+                ),
+            );
+            
+            x_offset += img_width;
+        }
+        
+        // Convert to texture
+        let texture = SafeTexture::from(atlas_image).with_filter(GL_LINEAR);
+        
+        Ok(Self {
+            texture,
+            width: total_width as f32,
+            height: max_height as f32,
+            regions,
+        })
+    }
+    
+    /// Get UV coordinates for a named region
+    pub fn get_uv_rect(&self, name: &str) -> Option<Rect> {
+        self.regions.get(name).map(|region| region.to_uv_rect(self.width, self.height))
+    }
+    
+    /// Get the region for a named texture
+    pub fn get_region(&self, name: &str) -> Option<&TextureAtlasRegion> {
+        self.regions.get(name)
+    }
 }
 
 // Increased from 64 to 256 for better batching performance
@@ -136,6 +218,10 @@ pub struct NoteStyle {
     pub drag: SafeTexture,
     pub hold_body: Option<SafeTexture>,
     pub hold_atlas: (u32, u32),
+    
+    // Optional texture atlas support for better performance
+    pub atlas: Option<TextureAtlas>,
+    pub atlas_uvs: std::collections::HashMap<String, Rect>,
 }
 
 impl NoteStyle {
@@ -144,6 +230,28 @@ impl NoteStyle {
             bail!("Invalid atlas");
         }
         Ok(())
+    }
+    
+    /// Get the texture to use for rendering - atlas if available, otherwise individual texture
+    pub fn get_texture(&self, note_type: &str) -> &SafeTexture {
+        if let Some(ref atlas) = self.atlas {
+            return &atlas.texture;
+        }
+        match note_type {
+            "click" => &self.click,
+            "hold" => &self.hold,
+            "flick" => &self.flick,
+            "drag" => &self.drag,
+            _ => &self.click,
+        }
+    }
+    
+    /// Get UV rect for a note type - from atlas if available, otherwise full texture
+    pub fn get_uv_rect(&self, note_type: &str) -> Rect {
+        if let Some(uv) = self.atlas_uvs.get(note_type) {
+            return *uv;
+        }
+        Rect::new(0., 0., 1., 1.)
     }
 
     #[inline]
@@ -195,6 +303,47 @@ impl ResourcePack {
         )
         .await
     }
+    
+    /// Try to create a texture atlas for note textures
+    /// Returns None if atlas creation fails (will fall back to individual textures)
+    async fn try_create_atlas(fs: &mut dyn FileSystem) -> (Option<TextureAtlas>, std::collections::HashMap<String, Rect>) {
+        // Try to load all note textures as images
+        let note_files = vec![
+            ("click", "click.png"),
+            ("hold", "hold.png"),
+            ("flick", "flick.png"),
+            ("drag", "drag.png"),
+        ];
+        
+        let mut textures = Vec::new();
+        for (name, path) in note_files {
+            if let Ok(data) = fs.load_file(path).await {
+                if let Ok(img) = image::load_from_memory(&data) {
+                    textures.push((name.to_string(), img));
+                } else {
+                    // If any texture fails to load, don't use atlas
+                    return (None, std::collections::HashMap::new());
+                }
+            } else {
+                return (None, std::collections::HashMap::new());
+            }
+        }
+        
+        // Create atlas
+        match TextureAtlas::pack_horizontal(textures).await {
+            Ok(atlas) => {
+                // Extract UV coordinates
+                let mut uvs = std::collections::HashMap::new();
+                for name in &["click", "hold", "flick", "drag"] {
+                    if let Some(uv) = atlas.get_uv_rect(name) {
+                        uvs.insert(name.to_string(), uv);
+                    }
+                }
+                (Some(atlas), uvs)
+            }
+            Err(_) => (None, std::collections::HashMap::new()),
+        }
+    }
 
     pub async fn load(fs: &mut dyn FileSystem) -> Result<Self> {
         macro_rules! load_tex {
@@ -203,7 +352,12 @@ impl ResourcePack {
                     .with_filter(GL_LINEAR)
             };
         }
+        
         let info: ResPackInfo = serde_yaml::from_str(&String::from_utf8(fs.load_file("info.yml").await.context("Missing info.yml")?)?)?;
+        
+        // Try to create texture atlas for better performance (optional optimization)
+        let (atlas_opt, atlas_uvs) = Self::try_create_atlas(fs).await;
+        
         let mut note_style = NoteStyle {
             click: load_tex!("click.png"),
             hold: load_tex!("hold.png"),
@@ -211,8 +365,11 @@ impl ResourcePack {
             drag: load_tex!("drag.png"),
             hold_body: None,
             hold_atlas: info.hold_atlas,
+            atlas: atlas_opt.clone(),
+            atlas_uvs: atlas_uvs.clone(),
         };
         note_style.verify()?;
+        
         let mut note_style_mh = NoteStyle {
             click: load_tex!("click_mh.png"),
             hold: load_tex!("hold_mh.png"),
@@ -220,6 +377,8 @@ impl ResourcePack {
             drag: load_tex!("drag_mh.png"),
             hold_body: None,
             hold_atlas: info.hold_atlas_mh,
+            atlas: atlas_opt,
+            atlas_uvs,
         };
         note_style_mh.verify()?;
         if info.hold_repeat {

@@ -2,6 +2,7 @@ use super::Ui;
 use macroquad::prelude::*;
 use miniquad::{BlendFactor, BlendState, BlendValue, Equation};
 use once_cell::sync::Lazy;
+use std::cell::RefCell;
 
 fn alpha_blend_material_params(uniforms: Vec<(String, UniformType)>) -> MaterialParams {
     MaterialParams {
@@ -43,6 +44,42 @@ static SECTOR_MATERIAL: Lazy<Material> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Shadow batch for reducing material state changes
+/// Collects multiple shadow draw calls and renders them together
+thread_local! {
+    static SHADOW_BATCH: RefCell<Vec<(Rect, ShadowConfig)>> = RefCell::new(Vec::new());
+}
+
+/// Enable shadow batching for performance optimization
+/// Call this before rendering UI, then call flush_shadow_batch() after
+pub fn enable_shadow_batching() {
+    SHADOW_BATCH.with(|batch| {
+        batch.borrow_mut().clear();
+    });
+}
+
+/// Flush all batched shadows - renders all collected shadows in one pass
+pub fn flush_shadow_batch() {
+    SHADOW_BATCH.with(|batch| {
+        let shadows = batch.borrow_mut();
+        if shadows.is_empty() {
+            return;
+        }
+        
+        let mat = *SHADOW_MATERIAL;
+        gl_use_material(mat);
+        
+        for (gr, config) in shadows.iter() {
+            mat.set_uniform("rect", vec4(gr.x, gr.y, gr.right(), gr.bottom()));
+            config.apply(&mat);
+            let r3 = config.elevation * 3.0;
+            draw_rectangle(gr.x - r3, gr.y - r3, gr.w + r3 * 2., gr.h + r3 * 2., WHITE);
+        }
+        
+        gl_use_default_material();
+    });
+}
+
 #[derive(Clone, Copy)]
 pub struct ShadowConfig {
     pub elevation: f32,
@@ -77,19 +114,33 @@ impl ShadowConfig {
 }
 
 pub fn rounded_rect_shadow(ui: &mut Ui, r: Rect, config: &ShadowConfig) {
-    // r.y += elevation * 0.5;
-    let mat = *SHADOW_MATERIAL;
+    rounded_rect_shadow_batched(ui, r, config, false);
+}
+
+/// Optimized shadow rendering with optional batching support
+/// When batched=true, shadows are collected and rendered together to reduce state changes
+pub fn rounded_rect_shadow_batched(ui: &mut Ui, r: Rect, config: &ShadowConfig, batched: bool) {
     let gr = ui.rect_to_global(r);
-    mat.set_uniform("rect", vec4(gr.x, gr.y, gr.right(), gr.bottom()));
-    ShadowConfig {
+    let shadow_config = ShadowConfig {
         base: config.base * ui.alpha,
         ..*config
+    };
+    
+    if batched {
+        // Add to batch for later rendering
+        SHADOW_BATCH.with(|batch| {
+            batch.borrow_mut().push((gr, shadow_config));
+        });
+    } else {
+        // Render immediately (legacy behavior)
+        let mat = *SHADOW_MATERIAL;
+        mat.set_uniform("rect", vec4(gr.x, gr.y, gr.right(), gr.bottom()));
+        shadow_config.apply(&mat);
+        gl_use_material(mat);
+        let r3 = config.elevation * 3.0;
+        draw_rectangle(gr.x - r3, gr.y - r3, gr.w + r3 * 2., gr.h + r3 * 2., WHITE);
+        gl_use_default_material();
     }
-    .apply(&mat);
-    gl_use_material(mat);
-    let r3 = config.elevation * 3.0;
-    draw_rectangle(gr.x - r3, gr.y - r3, gr.w + r3 * 2., gr.h + r3 * 2., WHITE);
-    gl_use_default_material();
 }
 
 pub fn clip_rounded_rect<R>(ui: &mut Ui, r: Rect, radius: f32, f: impl FnOnce(&mut Ui) -> R) -> R {
