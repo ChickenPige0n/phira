@@ -105,10 +105,11 @@ pub struct VertexBuilder<T: Shading> {
 
 impl<T: Shading> VertexBuilder<T> {
     fn new(matrix: Matrix, shading: T, alpha: f32) -> Self {
+        // Pre-allocate reasonable capacity to reduce reallocations
         Self {
             matrix,
-            vertices: Vec::new(),
-            indices: Vec::new(),
+            vertices: Vec::with_capacity(64),
+            indices: Vec::with_capacity(96),
             shading,
             alpha,
         }
@@ -128,6 +129,7 @@ impl<T: Shading> VertexBuilder<T> {
         let gl = unsafe { get_internal_gl() }.quad_gl;
         gl.texture(self.shading.texture());
         gl.draw_mode(DrawMode::Triangles);
+        // Use geometry in single call for better batching
         gl.geometry(&self.vertices, &self.indices);
     }
 }
@@ -675,7 +677,10 @@ impl<'a> Ui<'a> {
         let gl = unsafe { get_internal_gl() }.quad_gl;
         gl.texture(texture);
         gl.draw_mode(DrawMode::Triangles);
-        gl.geometry(&std::mem::take(&mut self.vertex_buffers.vertices), &std::mem::take(&mut self.vertex_buffers.indices));
+        // Take ownership of buffers to avoid cloning, they will be cleared
+        let vertices = std::mem::take(&mut self.vertex_buffers.vertices);
+        let indices = std::mem::take(&mut self.vertex_buffers.indices);
+        gl.geometry(&vertices, &indices);
     }
 
     pub fn screen_rect(&self) -> Rect {

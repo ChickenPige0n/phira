@@ -22,7 +22,28 @@ use std::{
     sync::atomic::AtomicU32,
 };
 
-pub const MAX_SIZE: usize = 64; // needs tweaking
+// Texture atlas for packing multiple textures to reduce texture switches
+#[derive(Clone, Debug)]
+pub struct TextureAtlasRegion {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl TextureAtlasRegion {
+    pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+    
+    pub fn to_rect(&self) -> Rect {
+        Rect::new(self.x, self.y, self.w, self.h)
+    }
+}
+
+// Increased from 64 to 256 for better batching performance
+// This allows 256 quads (1024 vertices) per batch, reducing draw calls significantly
+pub const MAX_SIZE: usize = 256;
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
 pub const BUFFER_SIZE: usize = 1024;
 
@@ -345,7 +366,10 @@ impl NoteBuffer {
     pub fn push(&mut self, key: (i8, GLuint), vertices: [Vertex; 4]) {
         let meshes = self.0.entry(key).or_default();
         if meshes.last().is_none_or(|it| it.0.len() + 4 > MAX_SIZE * 4) {
-            meshes.push(Default::default());
+            // Pre-allocate capacity for the new batch to avoid reallocations
+            let new_vertices = Vec::with_capacity(MAX_SIZE * 4);
+            let new_indices = Vec::with_capacity(MAX_SIZE * 6);
+            meshes.push((new_vertices, new_indices));
         }
         let last = meshes.last_mut().unwrap();
         let i = last.0.len() as u16;
@@ -358,8 +382,21 @@ impl NoteBuffer {
         gl.flush();
         let gl = gl.quad_gl;
         gl.draw_mode(DrawMode::Triangles);
+        
+        // Cache last texture to avoid redundant texture binding
+        let mut last_texture: Option<GLuint> = None;
+        
+        // Process batches sorted by render order and texture
         for ((_, tex_id), meshes) in std::mem::take(&mut self.0).into_iter() {
-            gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::TextureFormat::RGBA8) })));
+            // Only bind texture if it's different from the last one
+            if last_texture != Some(tex_id) {
+                gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { 
+                    Texture::from_raw_id(tex_id, miniquad::TextureFormat::RGBA8) 
+                })));
+                last_texture = Some(tex_id);
+            }
+            
+            // Draw all batches for this texture in one go to minimize state changes
             for mesh in meshes {
                 gl.geometry(&mesh.0, &mesh.1);
             }

@@ -58,6 +58,13 @@ fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color
     if h < 0. {
         return;
     }
+    
+    // Early culling optimization: check if quad is completely off-screen before processing
+    let margin = 0.1; // Small margin to account for edge cases
+    if x + w < -1.0 - margin || x > 1.0 + margin || y + h < -1.0 - margin || y > 1.0 + margin {
+        return;
+    }
+    
     let mut p = [Point::new(x, y), Point::new(x + w, y), Point::new(x + w, y + h), Point::new(x, y + h)];
     if clip {
         if y + h <= 0. {
@@ -77,6 +84,8 @@ fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color
 }
 fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], color: Color, params: DrawTextureParams) {
     let mut p = p.map(|it| res.world_to_screen(it));
+    
+    // Frustum culling: skip if all vertices are outside screen bounds
     if p[0].x.min(p[1].x.min(p[2].x.min(p[3].x))) > 1.
         || p[0].x.max(p[1].x.max(p[2].x.max(p[3].x))) < -1.
         || p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) > 1.
