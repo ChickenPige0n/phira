@@ -359,6 +359,15 @@ impl ParticleEmitter {
     }
 }
 
+/// Batched rendering buffer for notes
+/// 
+/// This buffer groups notes by (render_order, texture_id) to minimize draw calls
+/// and state changes. Notes are batched into groups of up to MAX_SIZE quads.
+/// 
+/// Performance characteristics:
+/// - Batching: Up to 256 quads (1024 vertices) per batch
+/// - State optimization: Texture binding only when texture changes
+/// - Memory efficiency: Pre-allocated buffers reduce allocations
 #[derive(Default)]
 pub struct NoteBuffer(BTreeMap<(i8, GLuint), Vec<(Vec<Vertex>, Vec<u16>)>>);
 
@@ -367,6 +376,7 @@ impl NoteBuffer {
         let meshes = self.0.entry(key).or_default();
         if meshes.last().is_none_or(|it| it.0.len() + 4 > MAX_SIZE * 4) {
             // Pre-allocate capacity for the new batch to avoid reallocations
+            // This reduces memory allocation overhead during rendering
             let new_vertices = Vec::with_capacity(MAX_SIZE * 4);
             let new_indices = Vec::with_capacity(MAX_SIZE * 6);
             meshes.push((new_vertices, new_indices));
@@ -384,9 +394,11 @@ impl NoteBuffer {
         gl.draw_mode(DrawMode::Triangles);
         
         // Cache last texture to avoid redundant texture binding
+        // This reduces OpenGL state changes and improves performance
         let mut last_texture: Option<GLuint> = None;
         
         // Process batches sorted by render order and texture
+        // The BTreeMap ensures correct depth ordering (i8) and groups by texture (GLuint)
         for ((_, tex_id), meshes) in std::mem::take(&mut self.0).into_iter() {
             // Only bind texture if it's different from the last one
             if last_texture != Some(tex_id) {

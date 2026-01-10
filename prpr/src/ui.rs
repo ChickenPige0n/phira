@@ -105,7 +105,9 @@ pub struct VertexBuilder<T: Shading> {
 
 impl<T: Shading> VertexBuilder<T> {
     fn new(matrix: Matrix, shading: T, alpha: f32) -> Self {
-        // Pre-allocate reasonable capacity to reduce reallocations
+        // Pre-allocate reasonable capacity to reduce reallocations during rendering
+        // Typical UI elements need 4-64 vertices, so 64 is a good default
+        // Index count is typically 1.5x vertex count for quad-based rendering
         Self {
             matrix,
             vertices: Vec::with_capacity(64),

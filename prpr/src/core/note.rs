@@ -53,6 +53,12 @@ pub struct RenderConfig<'a> {
     pub incline_sin: f32,
 }
 
+/// Draw a textured quad with optional clipping
+/// 
+/// Performance optimizations:
+/// - Early culling for off-screen quads (reduces vertex processing)
+/// - Efficient texture coordinate calculation
+/// - Batched rendering via NoteBuffer (reduces draw calls)
 fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color: Color, mut params: DrawTextureParams, clip: bool) {
     let Vec2 { x: w, y: h } = params.dest_size.unwrap();
     if h < 0. {
