@@ -7,6 +7,7 @@ use crate::{
     particle::{AtlasConfig, ColorCurve, Emitter, EmitterConfig},
 };
 use anyhow::{bail, Context, Result};
+use image::RgbaImage;
 use macroquad::prelude::*;
 use miniquad::{
     gl::{GLuint, GL_LINEAR},
@@ -108,18 +109,95 @@ impl ResPackInfo {
     }
 }
 
+/// A region within a texture atlas, storing UV coordinates and original dimensions.
+#[derive(Clone)]
+pub struct AtlasRegion {
+    /// UV region within the atlas (0..1 normalized coordinates)
+    pub region: Rect,
+    /// Original texture width in pixels
+    pub w: f32,
+    /// Original texture height in pixels
+    pub h: f32,
+}
+
+impl AtlasRegion {
+    /// Transform a local UV rect (in 0..1 space of the original texture) to atlas UV coordinates.
+    pub fn transform_uv(&self, local: Rect) -> Rect {
+        Rect::new(
+            self.region.x + local.x * self.region.w,
+            self.region.y + local.y * self.region.h,
+            local.w * self.region.w,
+            local.h * self.region.h,
+        )
+    }
+
+    /// Get the full UV region of this texture in the atlas.
+    pub fn full_uv(&self) -> Rect {
+        self.region
+    }
+
+    pub fn width(&self) -> f32 {
+        self.w
+    }
+
+    pub fn height(&self) -> f32 {
+        self.h
+    }
+}
+
+/// Pack multiple RGBA images into a single atlas texture using a simple shelf-based algorithm.
+/// Returns the atlas image and UV regions for each input image.
+fn pack_into_atlas(images: &[&RgbaImage]) -> (RgbaImage, Vec<Rect>) {
+    let max_atlas_width = 4096u32;
+    let mut atlas_width = 0u32;
+    let mut atlas_height = 0u32;
+    let mut shelf_height = 0u32;
+    let mut shelf_x = 0u32;
+    let mut positions = Vec::with_capacity(images.len());
+
+    for img in images {
+        let (iw, ih) = (img.width(), img.height());
+        if shelf_x + iw > max_atlas_width && shelf_x > 0 {
+            atlas_height += shelf_height;
+            shelf_x = 0;
+            shelf_height = 0;
+        }
+        positions.push((shelf_x, atlas_height));
+        shelf_x += iw;
+        shelf_height = shelf_height.max(ih);
+        atlas_width = atlas_width.max(shelf_x);
+    }
+    atlas_height += shelf_height;
+
+    let mut atlas = RgbaImage::new(atlas_width, atlas_height);
+    let mut regions = Vec::with_capacity(images.len());
+
+    for (img, &(px, py)) in images.iter().zip(positions.iter()) {
+        image::imageops::overlay(&mut atlas, *img, px as i64, py as i64);
+        regions.push(Rect::new(
+            px as f32 / atlas_width as f32,
+            py as f32 / atlas_height as f32,
+            img.width() as f32 / atlas_width as f32,
+            img.height() as f32 / atlas_height as f32,
+        ));
+    }
+
+    (atlas, regions)
+}
+
 pub struct NoteStyle {
-    pub click: SafeTexture,
-    pub hold: SafeTexture,
-    pub flick: SafeTexture,
-    pub drag: SafeTexture,
+    pub atlas: SafeTexture,
+    pub click: AtlasRegion,
+    pub hold: AtlasRegion,
+    pub flick: AtlasRegion,
+    pub drag: AtlasRegion,
     pub hold_body: Option<SafeTexture>,
     pub hold_atlas: (u32, u32),
 }
 
 impl NoteStyle {
     pub fn verify(&self) -> Result<()> {
-        if (self.hold_atlas.0 + self.hold_atlas.1) as f32 >= self.hold.height() {
+        if (self.hold_atlas.0 + self.hold_atlas.1) as f32 >= self.hold.h {
             bail!("Invalid atlas");
         }
         Ok(())
@@ -127,27 +205,30 @@ impl NoteStyle {
 
     #[inline]
     fn to_uv(&self, t: u32) -> f32 {
-        t as f32 / self.hold.height()
+        t as f32 / self.hold.h
     }
 
     pub fn hold_ratio(&self) -> f32 {
-        self.hold.height() / self.hold.width()
+        self.hold.h / self.hold.w
     }
 
+    /// Returns the atlas-transformed UV rect for the hold head region.
     pub fn hold_head_rect(&self) -> Rect {
         let sy = self.to_uv(self.hold_atlas.1);
-        Rect::new(0., 1. - sy, 1., sy)
+        self.hold.transform_uv(Rect::new(0., 1. - sy, 1., sy))
     }
 
+    /// Returns the atlas-transformed UV rect for the hold body region.
     pub fn hold_body_rect(&self) -> Rect {
         let sy = self.to_uv(self.hold_atlas.0);
         let ey = 1. - self.to_uv(self.hold_atlas.1);
-        Rect::new(0., sy, 1., ey - sy)
+        self.hold.transform_uv(Rect::new(0., sy, 1., ey - sy))
     }
 
+    /// Returns the atlas-transformed UV rect for the hold tail region.
     pub fn hold_tail_rect(&self) -> Rect {
         let ey = self.to_uv(self.hold_atlas.0);
-        Rect::new(0., 0., 1., ey)
+        self.hold.transform_uv(Rect::new(0., 0., 1., ey))
     }
 }
 
@@ -160,6 +241,7 @@ pub struct ResourcePack {
     pub sfx_flick: AudioClip,
     pub ending: AudioClip,
     pub hit_fx: SafeTexture,
+    pub hit_fx_region: AtlasRegion,
 }
 
 impl ResourcePack {
@@ -176,50 +258,89 @@ impl ResourcePack {
     }
 
     pub async fn load(fs: &mut dyn FileSystem) -> Result<Self> {
-        macro_rules! load_tex {
+        macro_rules! load_img {
             ($path:literal) => {
-                SafeTexture::from(image::load_from_memory(&fs.load_file($path).await.with_context(|| format!("Missing {}", $path))?)?)
-                    .with_filter(GL_LINEAR)
+                image::load_from_memory(&fs.load_file($path).await.with_context(|| format!("Missing {}", $path))?)?
+                    .into_rgba8()
             };
         }
         let info: ResPackInfo = serde_yaml::from_str(&String::from_utf8(fs.load_file("info.yml").await.context("Missing info.yml")?)?)?;
+
+        // Load all images into CPU memory
+        let click_img = load_img!("click.png");
+        let hold_img = load_img!("hold.png");
+        let flick_img = load_img!("flick.png");
+        let drag_img = load_img!("drag.png");
+        let click_mh_img = load_img!("click_mh.png");
+        let hold_mh_img = load_img!("hold_mh.png");
+        let flick_mh_img = load_img!("flick_mh.png");
+        let drag_mh_img = load_img!("drag_mh.png");
+        let hit_fx_img = load_img!("hit_fx.png");
+
+        // Pack all images into a single atlas
+        let all_images: Vec<&RgbaImage> = vec![
+            &click_img, &hold_img, &flick_img, &drag_img,
+            &click_mh_img, &hold_mh_img, &flick_mh_img, &drag_mh_img,
+            &hit_fx_img,
+        ];
+        let (atlas_img, regions) = pack_into_atlas(&all_images);
+        let atlas_tex: SafeTexture = Texture2D::from_rgba8(
+            atlas_img.width() as u16,
+            atlas_img.height() as u16,
+            &atlas_img,
+        ).into();
+        let atlas_tex = atlas_tex.with_filter(GL_LINEAR);
+
+        let make_region = |idx: usize, img: &RgbaImage| AtlasRegion {
+            region: regions[idx],
+            w: img.width() as f32,
+            h: img.height() as f32,
+        };
+
         let mut note_style = NoteStyle {
-            click: load_tex!("click.png"),
-            hold: load_tex!("hold.png"),
-            flick: load_tex!("flick.png"),
-            drag: load_tex!("drag.png"),
+            atlas: atlas_tex.clone(),
+            click: make_region(0, &click_img),
+            hold: make_region(1, &hold_img),
+            flick: make_region(2, &flick_img),
+            drag: make_region(3, &drag_img),
             hold_body: None,
             hold_atlas: info.hold_atlas,
         };
         note_style.verify()?;
+
         let mut note_style_mh = NoteStyle {
-            click: load_tex!("click_mh.png"),
-            hold: load_tex!("hold_mh.png"),
-            flick: load_tex!("flick_mh.png"),
-            drag: load_tex!("drag_mh.png"),
+            atlas: atlas_tex.clone(),
+            click: make_region(4, &click_mh_img),
+            hold: make_region(5, &hold_mh_img),
+            flick: make_region(6, &flick_mh_img),
+            drag: make_region(7, &drag_mh_img),
             hold_body: None,
             hold_atlas: info.hold_atlas_mh,
         };
         note_style_mh.verify()?;
+
         if info.hold_repeat {
-            fn get_body(style: &mut NoteStyle) {
-                let pixels = style.hold.get_texture_data();
-                let width = style.hold.width() as u16;
-                let height = style.hold.height() as u16;
-                let atlas = style.hold_atlas;
+            fn get_body(img: &RgbaImage, atlas: (u32, u32)) -> SafeTexture {
+                let width = img.width() as u16;
+                let height = img.height() as u16;
+                let row_bytes = width as usize * 4;
+                let start = atlas.0 as usize * row_bytes;
+                let end = img.len() - atlas.1 as usize * row_bytes;
                 let res = Texture2D::from_rgba8(
                     width,
                     height - atlas.0 as u16 - atlas.1 as u16,
-                    &pixels.bytes[(atlas.0 as usize * width as usize * 4)..(pixels.bytes.len() - atlas.1 as usize * width as usize * 4)],
+                    &img.as_raw()[start..end],
                 );
                 let context = unsafe { get_internal_gl() }.quad_context;
                 res.raw_miniquad_texture_handle().set_wrap(context, TextureWrap::Repeat);
-                style.hold_body = Some(res.into());
+                res.into()
             }
-            get_body(&mut note_style);
-            get_body(&mut note_style_mh);
+            note_style.hold_body = Some(get_body(&hold_img, info.hold_atlas));
+            note_style_mh.hold_body = Some(get_body(&hold_mh_img, info.hold_atlas_mh));
         }
-        let hit_fx = image::load_from_memory(&fs.load_file("hit_fx.png").await.context("Missing hit_fx.png")?)?.into();
+
+        let hit_fx_region = make_region(8, &hit_fx_img);
+        let hit_fx = atlas_tex.clone();
 
         macro_rules! load_clip {
             ($path:literal) => {
@@ -262,6 +383,7 @@ impl ResourcePack {
             sfx_flick: load_clip!("flick"),
             ending: load_clip!("ending"),
             hit_fx,
+            hit_fx_region,
         })
     }
 }
@@ -283,6 +405,7 @@ impl ParticleEmitter {
             end.a = 0.;
             ColorCurve { start, mid, end }
         };
+        let hit_fx_uv = &res_pack.hit_fx_region.region;
         let mut res = Self {
             scale: res_pack.info.hit_fx_scale,
             emitter: Emitter::new(EmitterConfig {
@@ -293,7 +416,15 @@ impl ParticleEmitter {
                 initial_rotation_randomness: 0.0,
                 initial_direction_spread: 0.0,
                 initial_velocity: 0.0,
-                atlas: Some(AtlasConfig::new(res_pack.info.hit_fx.0 as _, res_pack.info.hit_fx.1 as _, ..)),
+                atlas: Some(AtlasConfig::new_with_offset(
+                    res_pack.info.hit_fx.0 as _,
+                    res_pack.info.hit_fx.1 as _,
+                    ..,
+                    hit_fx_uv.x,
+                    hit_fx_uv.y,
+                    hit_fx_uv.w,
+                    hit_fx_uv.h,
+                )),
                 emitting: false,
                 colors_curve,
                 ..Default::default()

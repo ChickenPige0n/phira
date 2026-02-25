@@ -7,7 +7,7 @@ use crate::{get_data, get_data_mut, save_data};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use prpr::{
-    core::{ParticleEmitter, ResourcePack, NOTE_WIDTH_RATIO_BASE},
+    core::{AtlasRegion, ParticleEmitter, ResourcePack, NOTE_WIDTH_RATIO_BASE},
     ext::{create_audio_manger, semi_black, RectExt, SafeTexture, ScaleType},
     time::TimeManager,
     ui::{Slider, Ui},
@@ -22,7 +22,8 @@ pub struct OffsetPage {
     tm: TimeManager,
     cali_last: bool,
 
-    click: SafeTexture,
+    click_atlas: SafeTexture,
+    click_region: AtlasRegion,
     _hit_fx: SafeTexture,
     emitter: ParticleEmitter,
     color: Color,
@@ -53,7 +54,8 @@ impl OffsetPage {
         let respack = ResourcePack::from_path(get_data().config.res_pack_path.as_ref())
             .await
             .context("Failed to load resource pack")?;
-        let click = respack.note_style.click.clone();
+        let click_atlas = respack.note_style.atlas.clone();
+        let click_region = respack.note_style.click.clone();
         let emitter = ParticleEmitter::new(&respack, get_data().config.note_scale, respack.info.hide_particles)?;
         Ok(Self {
             _audio: audio,
@@ -63,7 +65,8 @@ impl OffsetPage {
             tm,
             cali_last: false,
 
-            click,
+            click_atlas,
+            click_region,
             _hit_fx: respack.hit_fx,
             emitter,
             color: respack.info.fx_perfect(),
@@ -171,9 +174,26 @@ impl Page for OffsetPage {
             }
             if t <= 1. {
                 let w = NOTE_WIDTH_RATIO_BASE * config.note_scale * 2.;
-                let h = w * self.click.height() / self.click.width();
+                let h = w * self.click_region.height() / self.click_region.width();
                 let r = Rect::new(ct.0 - w / 2., ny, w, h);
-                ui.fill_rect(r, (*self.click, r, ScaleType::Fit));
+                let src = Rect::new(
+                    self.click_region.region.x * self.click_atlas.width(),
+                    self.click_region.region.y * self.click_atlas.height(),
+                    self.click_region.region.w * self.click_atlas.width(),
+                    self.click_region.region.h * self.click_atlas.height(),
+                );
+                let r_global = ui.rect_to_global(r);
+                draw_texture_ex(
+                    *self.click_atlas,
+                    r_global.x,
+                    r_global.y,
+                    WHITE,
+                    DrawTextureParams {
+                        source: Some(src),
+                        dest_size: Some(vec2(r_global.w, r_global.h)),
+                        ..Default::default()
+                    },
+                );
                 self.cali_last = true;
             } else {
                 if self.cali_last {

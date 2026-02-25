@@ -318,10 +318,27 @@ pub struct AtlasConfig {
     m: u16,
     start_index: u16,
     end_index: u16,
+    /// Base UV offset and scale for atlas-embedded textures
+    base_u: f32,
+    base_v: f32,
+    scale_u: f32,
+    scale_v: f32,
 }
 
 impl AtlasConfig {
     pub fn new<T: std::ops::RangeBounds<u16>>(n: u16, m: u16, range: T) -> AtlasConfig {
+        Self::new_with_offset(n, m, range, 0.0, 0.0, 1.0, 1.0)
+    }
+
+    pub fn new_with_offset<T: std::ops::RangeBounds<u16>>(
+        n: u16,
+        m: u16,
+        range: T,
+        base_u: f32,
+        base_v: f32,
+        scale_u: f32,
+        scale_v: f32,
+    ) -> AtlasConfig {
         let start_index = match range.start_bound() {
             std::ops::Bound::Unbounded => 0,
             std::ops::Bound::Included(i) => *i,
@@ -338,6 +355,10 @@ impl AtlasConfig {
             m,
             start_index,
             end_index,
+            base_u,
+            base_v,
+            scale_u,
+            scale_v,
         }
     }
 }
@@ -696,7 +717,12 @@ impl Emitter {
                 let x = cpu.frame % atlas.n;
                 let y = cpu.frame / atlas.n;
 
-                gpu.uv = vec4(x as f32 / atlas.n as f32, y as f32 / atlas.m as f32, 1.0 / atlas.n as f32, 1.0 / atlas.m as f32);
+                gpu.uv = vec4(
+                    atlas.base_u + x as f32 / atlas.n as f32 * atlas.scale_u,
+                    atlas.base_v + y as f32 / atlas.m as f32 * atlas.scale_v,
+                    atlas.scale_u / atlas.n as f32,
+                    atlas.scale_v / atlas.m as f32,
+                );
             } else {
                 gpu.uv = vec4(0.0, 0.0, 1.0, 1.0);
             }

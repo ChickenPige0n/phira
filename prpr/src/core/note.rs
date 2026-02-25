@@ -1,4 +1,4 @@
-use super::{chart::ChartSettings, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource};
+use super::{chart::ChartSettings, AtlasRegion, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource};
 pub use crate::{
     judge::{HitSound, JudgeStatus},
     parse::RPE_HEIGHT,
@@ -107,17 +107,18 @@ fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], co
         .push((order, texture.raw_miniquad_texture_handle().gl_internal_id()), vertices);
 }
 
-fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Color) {
-    let hf = vec2(scale, tex.height() * scale / tex.width());
+fn draw_center(res: &Resource, atlas: Texture2D, region: &AtlasRegion, order: i8, scale: f32, color: Color) {
+    let hf = vec2(scale, region.height() * scale / region.width());
     draw_tex(
         res,
-        tex,
+        atlas,
         order,
         -hf.x,
         -hf.y,
         color,
         DrawTextureParams {
             dest_size: Some(hf * 2.),
+            source: Some(region.full_uv()),
             ..Default::default()
         },
         false,
@@ -235,18 +236,22 @@ impl Note {
         } else {
             &res.res_pack.note_style
         };
-        let draw = |res: &mut Resource, tex: Texture2D| {
+        let atlas_tex = *style.atlas;
+        let click_region = style.click.clone();
+        let flick_region = style.flick.clone();
+        let drag_region = style.drag.clone();
+        let draw = |res: &mut Resource, region: &AtlasRegion| {
             let mut color = color;
             if !config.draw_below {
                 color.a *= (self.time - res.time).min(0.) / FADEOUT_TIME + 1.;
             }
             res.with_model(self.now_transform(res, ctrl_obj, base, config.incline_sin), |res| {
-                draw_center(res, tex, order, scale, color);
+                draw_center(res, atlas_tex, region, order, scale, color);
             });
         };
         match self.kind {
             NoteKind::Click => {
-                draw(res, *style.click);
+                draw(res, &click_region);
             }
             NoteKind::Hold { end_time, end_height } => {
                 res.with_model(self.now_transform(res, ctrl_obj, 0., 0.), |res| {
@@ -267,17 +272,17 @@ impl Note {
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = h - line_height;
                     let top = end_height - line_height;
-                    let tex = &style.hold;
+                    let hold_region = &style.hold;
                     let ratio = style.hold_ratio();
                     // body
                     // TODO (end_height - height) is not always total height
                     draw_tex(
                         res,
-                        **(if res.res_pack.info.hold_repeat {
-                            style.hold_body.as_ref().unwrap()
+                        if res.res_pack.info.hold_repeat {
+                            **style.hold_body.as_ref().unwrap()
                         } else {
-                            tex
-                        }),
+                            *style.atlas
+                        },
                         order,
                         -scale,
                         bottom,
@@ -301,10 +306,13 @@ impl Note {
                     // head
                     if res.time < self.time || res.res_pack.info.hold_keep_head {
                         let r = style.hold_head_rect();
-                        let hf = vec2(scale, r.h / r.w * scale * ratio);
+                        let local_r = hold_region.transform_uv(Rect::new(0., 0., 1., 1.));
+                        let head_ratio = r.h / local_r.h;
+                        let head_w_ratio = r.w / local_r.w;
+                        let hf = vec2(scale, head_ratio / head_w_ratio * scale * ratio);
                         draw_tex(
                             res,
-                            **tex,
+                            *style.atlas,
                             order,
                             -scale,
                             bottom - if res.res_pack.info.hold_compact { hf.y } else { hf.y * 2. },
@@ -319,10 +327,13 @@ impl Note {
                     }
                     // tail
                     let r = style.hold_tail_rect();
-                    let hf = vec2(scale, r.h / r.w * scale * ratio);
+                    let local_r = hold_region.transform_uv(Rect::new(0., 0., 1., 1.));
+                    let tail_ratio = r.h / local_r.h;
+                    let tail_w_ratio = r.w / local_r.w;
+                    let hf = vec2(scale, tail_ratio / tail_w_ratio * scale * ratio);
                     draw_tex(
                         res,
-                        **tex,
+                        *style.atlas,
                         order,
                         -scale,
                         top - if res.res_pack.info.hold_compact { hf.y } else { 0. },
@@ -337,10 +348,10 @@ impl Note {
                 });
             }
             NoteKind::Flick => {
-                draw(res, *style.flick);
+                draw(res, &flick_region);
             }
             NoteKind::Drag => {
-                draw(res, *style.drag);
+                draw(res, &drag_region);
             }
         }
     }
@@ -359,14 +370,16 @@ impl BadNote {
         }
         res.with_model(self.matrix, |res| {
             let style = &res.res_pack.note_style;
+            let region = match &self.kind {
+                NoteKind::Click => &style.click,
+                NoteKind::Drag => &style.drag,
+                NoteKind::Flick => &style.flick,
+                _ => unreachable!(),
+            };
             draw_center(
                 res,
-                match &self.kind {
-                    NoteKind::Click => *style.click,
-                    NoteKind::Drag => *style.drag,
-                    NoteKind::Flick => *style.flick,
-                    _ => unreachable!(),
-                },
+                *style.atlas,
+                region,
                 self.kind.order(),
                 res.note_width,
                 Color::new(0.423529, 0.262745, 0.262745, (self.time - res.time).max(-1.) / BAD_TIME + 1.),

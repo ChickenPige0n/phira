@@ -10,7 +10,7 @@ use crate::{
 use anyhow::Result;
 use macroquad::prelude::*;
 use prpr::{
-    core::{NoteStyle, ParticleEmitter, ResPackInfo, ResourcePack},
+    core::{AtlasRegion, NoteStyle, ParticleEmitter, ResPackInfo, ResourcePack},
     ext::{create_audio_manger, poll_future, semi_black, semi_white, LocalTask, RectExt, SafeTexture, ScaleType},
     scene::{request_file, show_error, show_message},
     ui::{DRectButton, Dialog, Scroll, Ui},
@@ -267,35 +267,77 @@ impl Page for ResPackPage {
             if let Some(pack) = &item.loaded {
                 let width = 0.16;
                 let mut r = Rect::new(cr.x + 0.07, cr.y + 0.1, width, 0.);
-                let mut draw = |mut r: Rect, tex: Texture2D, mh: Texture2D| {
+                let atlas_tex = *pack.note_style.atlas;
+                let mut draw = |mut r: Rect, region: &AtlasRegion, mh_region: &AtlasRegion| {
                     let y = r.y;
-                    r.h = tex.height() / tex.width() * r.w;
+                    r.h = region.height() / region.width() * r.w;
                     r.y = y - r.h / 2.;
-                    ui.fill_rect(r, (tex, r, ScaleType::Fit));
+                    let src = Rect::new(
+                        region.region.x * atlas_tex.width(),
+                        region.region.y * atlas_tex.height(),
+                        region.region.w * atlas_tex.width(),
+                        region.region.h * atlas_tex.height(),
+                    );
+                    let r_global = ui.rect_to_global(r);
+                    draw_texture_ex(
+                        atlas_tex,
+                        r_global.x,
+                        r_global.y,
+                        semi_white(ui.alpha),
+                        DrawTextureParams {
+                            source: Some(src),
+                            dest_size: Some(vec2(r_global.w, r_global.h)),
+                            ..Default::default()
+                        },
+                    );
                     r.x += r.w * 1.8;
-                    r.w *= mh.width() / tex.width();
+                    r.w *= mh_region.width() / region.width();
                     r.x -= r.w / 2.;
-                    r.h = mh.height() / mh.width() * r.w;
+                    r.h = mh_region.height() / mh_region.width() * r.w;
                     r.y = y - r.h / 2.;
-                    ui.fill_rect(r, (mh, r, ScaleType::Fit));
+                    let src = Rect::new(
+                        mh_region.region.x * atlas_tex.width(),
+                        mh_region.region.y * atlas_tex.height(),
+                        mh_region.region.w * atlas_tex.width(),
+                        mh_region.region.h * atlas_tex.height(),
+                    );
+                    let r_global = ui.rect_to_global(r);
+                    draw_texture_ex(
+                        atlas_tex,
+                        r_global.x,
+                        r_global.y,
+                        semi_white(ui.alpha),
+                        DrawTextureParams {
+                            source: Some(src),
+                            dest_size: Some(vec2(r_global.w, r_global.h)),
+                            ..Default::default()
+                        },
+                    );
                 };
                 let sp = (cr.h - 0.4) / 2.;
-                draw(r, *pack.note_style.click, *pack.note_style_mh.click);
+                draw(r, &pack.note_style.click, &pack.note_style_mh.click);
                 r.y += sp;
-                draw(r, *pack.note_style.drag, *pack.note_style_mh.drag);
+                draw(r, &pack.note_style.drag, &pack.note_style_mh.drag);
                 r.y += sp;
-                draw(r, *pack.note_style.flick, *pack.note_style_mh.flick);
+                draw(r, &pack.note_style.flick, &pack.note_style_mh.flick);
                 r.y += sp;
                 let mut r = Rect::new(0.1, cr.y + 0.1, width, cr.h - 0.38);
                 let draw = |mut r: Rect, style: &NoteStyle, width: f32| {
-                    let conv = |r: Rect, tex: &SafeTexture| Rect::new(r.x * tex.width(), r.y * tex.height(), r.w * tex.width(), r.h * tex.height());
-                    let tr = conv(style.hold_tail_rect(), &style.hold);
+                    let conv_atlas = |r: Rect| {
+                        Rect::new(
+                            r.x * atlas_tex.width(),
+                            r.y * atlas_tex.height(),
+                            r.w * atlas_tex.width(),
+                            r.h * atlas_tex.height(),
+                        )
+                    };
+                    let tr = conv_atlas(style.hold_tail_rect());
                     let factor = if pack.info.hold_compact { 0.5 } else { 1. };
                     let h = tr.h / tr.w * width;
                     let r2 = Rect::new(r.x, r.y - h * factor, width, h);
                     let r2 = ui.rect_to_global(r2);
                     draw_texture_ex(
-                        *style.hold,
+                        atlas_tex,
                         r2.x,
                         r2.y,
                         semi_white(ui.alpha),
@@ -305,12 +347,12 @@ impl Page for ResPackPage {
                             ..Default::default()
                         },
                     );
-                    let tr = conv(style.hold_head_rect(), &style.hold);
+                    let tr = conv_atlas(style.hold_head_rect());
                     let h = tr.h / tr.w * width;
                     let r2 = Rect::new(r.x, r.bottom() - h * (1. - factor), width, h);
                     let r2 = ui.rect_to_global(r2);
                     draw_texture_ex(
-                        *style.hold,
+                        atlas_tex,
                         r2.x,
                         r2.y,
                         semi_white(ui.alpha),
@@ -326,7 +368,7 @@ impl Page for ResPackPage {
                         if pack.info.hold_repeat {
                             **style.hold_body.as_ref().unwrap()
                         } else {
-                            *style.hold
+                            atlas_tex
                         },
                         r2.x,
                         r2.y,
@@ -338,7 +380,7 @@ impl Page for ResPackPage {
                                     let w = hold_body.width();
                                     Rect::new(0., 0., w, r2.h / width / 2. * w)
                                 } else {
-                                    conv(style.hold_body_rect(), &style.hold)
+                                    conv_atlas(style.hold_body_rect())
                                 }
                             }),
                             dest_size: Some(vec2(r2.w, r2.h)),
@@ -357,10 +399,10 @@ impl Page for ResPackPage {
                 let inter = 1.5;
                 let rnd = t.div_euclid(inter);
                 let irnd = rnd as u32;
-                let tex = match irnd % 3 {
-                    0 => *pack.note_style.click,
-                    1 => *pack.note_style.drag,
-                    2 => *pack.note_style.flick,
+                let tex_region = match irnd % 3 {
+                    0 => &pack.note_style.click,
+                    1 => &pack.note_style.drag,
+                    2 => &pack.note_style.flick,
                     _ => unreachable!(),
                 };
                 let st = r.y + 0.06;
@@ -370,9 +412,26 @@ impl Page for ResPackPage {
                 let p = (t - inter * rnd) / 0.9;
                 if p <= 1. {
                     let y = st + (line - st) * p;
-                    let h = tex.height() / tex.width() * width;
+                    let h = tex_region.height() / tex_region.width() * width;
                     let r = Rect::new(cx - width / 2., y - h / 2., width, h);
-                    ui.fill_rect(r, (tex, r, ScaleType::Fit));
+                    let src = Rect::new(
+                        tex_region.region.x * atlas_tex.width(),
+                        tex_region.region.y * atlas_tex.height(),
+                        tex_region.region.w * atlas_tex.width(),
+                        tex_region.region.h * atlas_tex.height(),
+                    );
+                    let r_global = ui.rect_to_global(r);
+                    draw_texture_ex(
+                        atlas_tex,
+                        r_global.x,
+                        r_global.y,
+                        semi_white(ui.alpha),
+                        DrawTextureParams {
+                            source: Some(src),
+                            dest_size: Some(vec2(r_global.w, r_global.h)),
+                            ..Default::default()
+                        },
+                    );
                 } else if irnd != self.last_round {
                     if let Some(emitter) = &mut self.emitter {
                         emitter.emit_at(vec2(cx, line), 0., pack.info.fx_perfect());
