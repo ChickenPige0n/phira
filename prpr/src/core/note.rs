@@ -273,7 +273,6 @@ impl Note {
                     let bottom = h - line_height;
                     let top = end_height - line_height;
                     let hold_region = &style.hold;
-                    let ratio = style.hold_ratio();
                     // body
                     // TODO (end_height - height) is not always total height
                     draw_tex(
@@ -306,10 +305,7 @@ impl Note {
                     // head
                     if res.time < self.time || res.res_pack.info.hold_keep_head {
                         let r = style.hold_head_rect();
-                        let local_r = hold_region.transform_uv(Rect::new(0., 0., 1., 1.));
-                        let head_ratio = r.h / local_r.h;
-                        let head_w_ratio = r.w / local_r.w;
-                        let hf = vec2(scale, head_ratio / head_w_ratio * scale * ratio);
+                        let hf = vec2(scale, style.hold_atlas.1 as f32 / hold_region.w * scale);
                         draw_tex(
                             res,
                             *style.atlas,
@@ -327,10 +323,7 @@ impl Note {
                     }
                     // tail
                     let r = style.hold_tail_rect();
-                    let local_r = hold_region.transform_uv(Rect::new(0., 0., 1., 1.));
-                    let tail_ratio = r.h / local_r.h;
-                    let tail_w_ratio = r.w / local_r.w;
-                    let hf = vec2(scale, tail_ratio / tail_w_ratio * scale * ratio);
+                    let hf = vec2(scale, style.hold_atlas.0 as f32 / hold_region.w * scale);
                     draw_tex(
                         res,
                         *style.atlas,

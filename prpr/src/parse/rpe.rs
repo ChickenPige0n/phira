@@ -23,6 +23,24 @@ pub const RPE_WIDTH: f32 = 1350.;
 pub const RPE_HEIGHT: f32 = 900.;
 const SPEED_RATIO: f32 = 10. / 45. / HEIGHT_RATIO;
 
+/// Maximum dimension (width or height) for judgment line textures.
+/// Textures exceeding this will be downscaled to improve rendering performance.
+const MAX_LINE_TEXTURE_DIM: u32 = 2048;
+
+/// Downscale a DynamicImage if either dimension exceeds the maximum,
+/// preserving aspect ratio. Returns the image as-is if within limits.
+fn downscale_line_texture(img: DynamicImage) -> DynamicImage {
+    let (w, h) = (img.width(), img.height());
+    if w <= MAX_LINE_TEXTURE_DIM && h <= MAX_LINE_TEXTURE_DIM {
+        return img;
+    }
+    let scale = MAX_LINE_TEXTURE_DIM as f32 / w.max(h) as f32;
+    let new_w = (w as f32 * scale).round() as u32;
+    let new_h = (h as f32 * scale).round() as u32;
+    debug!("downscaling line texture from {}x{} to {}x{}", w, h, new_w, new_h);
+    img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RPEBpmItem {
@@ -547,11 +565,11 @@ async fn parse_judge_line(
                 debug!("texture {} reused, id: {}", rpe.texture.clone(), texture.clone().into_inner().raw_miniquad_texture_handle().gl_internal_id());
                 JudgeLineKind::Texture(texture.clone(), rpe.texture.clone())
             } else {
-                let texture = SafeTexture::from(image::load_from_memory(
+                let texture = SafeTexture::from(downscale_line_texture(image::load_from_memory(
                     &fs.load_file(&rpe.texture)
                         .await
                         .with_context(|| ptl!("illustration-load-failed", "path" => rpe.texture.clone()))?,
-                )?)
+                )?))
                 .with_mipmap();
                 line_texture_map.insert(rpe.texture.clone(), texture.clone());
                 JudgeLineKind::Texture(texture, rpe.texture.clone())
@@ -560,11 +578,11 @@ async fn parse_judge_line(
             debug!("texture {} reused, id: {}", rpe.texture.clone(), texture.clone().into_inner().raw_miniquad_texture_handle().gl_internal_id());
             JudgeLineKind::Texture(texture.clone(), rpe.texture.clone())
         } else {
-            let texture = SafeTexture::from(image::load_from_memory(
+            let texture = SafeTexture::from(downscale_line_texture(image::load_from_memory(
                 &fs.load_file(&rpe.texture)
                     .await
                     .with_context(|| ptl!("illustration-load-failed", "path" => rpe.texture.clone()))?,
-            )?)
+            )?))
             .with_mipmap();
             line_texture_map.insert(rpe.texture.clone(), texture.clone());
             JudgeLineKind::Texture(texture, rpe.texture.clone())
